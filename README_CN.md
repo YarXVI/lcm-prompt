@@ -1,7 +1,7 @@
-# LCM3 — 惰性上下文物化协议 v3（完整编码器版）
+# LCM2 — 惰性上下文物化协议 v2（协议版）
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [English](README_EN.md)
 
@@ -9,148 +9,102 @@
 
 ## 概述
 
-**LCM3** 是 LCM 系列的全功能主版本。在核心惰性上下文物化协议之上，引入了**完整的多粒度编码器体系**，将原始代码/文档智能压缩为 4 级粒度（KEYWORDS / SUMMARY / DETAIL / FULL），实现 Token 节省 80%-96% 的同时保持信息可恢复性。
+**LCM2** 是 LCM 协议的 V2 实现，面向高级集成场景。在 LCM1 核心哨兵协议基础上，增加了：
 
-从 IRIS (Intelligent Routing & Inference System) v17 架构中提取的核心组件，经过生产环境验证。
+- **线程安全**：所有操作带 RLock 保护
+- **持久化**：JSONL + 索引文件，进程重启不丢失
+- **精确 Token 计数**：支持 tiktoken 和中文估算
+- **LRU 缓存**：热点 chunk 内存缓存
+- **语义搜索**：支持向量相似度（可选 embedding）
+- **Chunk 依赖图**：DAG 拓扑排序
+- **混合模式**：高频直接注入 + 低频 LCM
+- **API 路由自动识别**：云端/本地自动切换
+- **KV Cache 联动**：利用云厂商缓存机制
+- **自适应粒度**：粗/细粒度动态调整
+- **质量评估**：系统性答案质量评估
+- **多 Agent 协作**：共享组件索引去重
+- **内容编码层**：支持可插拔的语言编码（中文思考等）
+- **多模态**：图片、PDF、音频 chunk 支持
+- **分布式存储**：多节点 chunk 存储，一致性哈希
+- **协议版本协商**：v1/v2/v3 兼容
 
-## 核心架构
+## 版本家族
 
-```
-原始内容 → [编码器层] → 多粒度 IR → [存储 & 路由] → [解码层] → LLM 注入
-                           ↓
-                    4 级粒度：
-                    KEYWORDS (~30-50 tok)
-                    SUMMARY  (~80-200 tok)
-                    DETAIL   (~300-800 tok)
-                    FULL     (原始大小)
-```
-
-### 六大核心引擎
-
-| 引擎 | 说明 |
-|------|------|
-| **多粒度编码器** | 可插拔架构，内置代码意图 / 中文思考 / 英语逻辑 / AST 四种编码器 |
-| **哨兵协议** | `[NEED_CHUNK:id]` / `[NEED_CHUNK_DETAIL:id]` / `[NEED_CHUNK_FULL:id]` 标准协议 |
-| **自适应注入器** | 软升级状态机 + 冷却窗口 + 计费经济学路由 |
-| **Chunk 存储** | LRU 缓存 + JSONL 持久化 + 异步预热 |
-| **动态渲染器** | 锚点标签驱动的微秒级精度注入 |
-| **渐进式校验网关** | 三级校验（语法 → Lint → 关联单测），弹性放行 |
+| 版本 | 分支 | 说明 |
+|------|------|------|
+| LCM3 | `main` | **全功能主版本**，带完整多粒度编码器体系 |
+| **LCM2** | **`lcm2`** | **V2 协议版**，面向高级集成场景 |
+| LCM1 | `lcm1` | 精简版，最小依赖，快速集成 |
 
 ## 快速开始
 
 ### 安装
 
 ```bash
-pip install lcm
+pip install lcm-protocol
+
+# 带性能优化
+pip install lcm-protocol[performance]
+
+# 完整安装
+pip install lcm-protocol[all]
 ```
 
-### 基本使用
+### 基础使用
 
 ```python
-from lcm import create_engine, GrainLevel
-from lcm.chunk_store import Chunk, ChunkStore
+from lcm_v2 import ChunkStoreV2, ContextChunk, LCMClientV2
 
-# 创建编码器注册 + 引擎
-engine = create_engine()
+# 1. 创建存储
+store = ChunkStoreV2()
 
-# 注册上下文块
-chunk = Chunk(
+# 2. 添加 chunks
+store.add_chunk(ContextChunk(
     chunk_id="auth_handler",
-    content="def login(username, password):\n    return authenticate(username, password)",
-    summary="认证处理器",
-    tokens=80,
-)
-engine.store.add(chunk)
+    content="def login(username, password): ...",
+    summary="认证处理器实现",
+))
 
-# 预热编码缓存
-engine.warmup_encodings()
+# 3. 构建 LCM 消息
+from lcm_v2 import build_initial_messages_v2
+messages = build_initial_messages_v2(store, "审查认证模块")
 
-# 构建系统提示词（含索引 + 哨兵协议指令）
-session = engine.new_session("demo")
-system_prompt = engine.build_system_prompt(
-    "你是一位 AI 助手，使用 [NEED_CHUNK:id] 按需加载上下文。",
-    "请审查认证模块",
-)
-
-# 处理 LLM 响应中的哨兵标记
-response_text = "让我看看 [NEED_CHUNK:auth_handler] 的实现"
-clean_text, load_requests = engine.process_response(response_text)
+# 4. 使用 LCM 对话
+client = LCMClientV2(llm_client=your_llm, chunk_store=store)
+result = client.chat(messages, your_stream_function)
 ```
 
-### 使用多粒度编码器
+## 核心特性
 
-```python
-from lcm import EncodingRegistry
-from lcm.encoders import CodeIntentEncoder, ChineseThinkEncoder
+| 特性 | 说明 |
+|------|------|
+| **按需加载** | 模型通过哨兵标记 `[NEED_CHUNK:id]` 请求 chunk |
+| **流式检测** | 在流式输出中实时检测哨兵标记 |
+| **Token 预算** | 智能预算管理，防止上下文溢出 |
+| **混合模式** | 高频 chunk 直接注入 + 低频 chunk 走 LCM |
+| **Provider 路由** | 自动识别云端/本地 API，自动切换策略 |
+| **KV Cache 优化** | 利用云厂商缓存机制（Anthropic/DeepSeek） |
+| **Chunk 依赖图** | 基于 DAG 的依赖解析和拓扑加载 |
+| **多 Agent 支持** | 跨 Agent 共享索引，自动去重 |
+| **异步 I/O** | 异步 LLM 调用和并发 chunk 加载 |
+| **多模态** | 支持图片、PDF、音频 chunk |
+| **分布式存储** | 多节点 chunk 存储，一致性哈希 |
+| **协议版本协商** | v1/v2/v3 兼容，特性协商 |
 
-registry = EncodingRegistry()
-registry.register(CodeIntentEncoder())    # 代码 → 4级粒度 + 调用图
-registry.register(ChineseThinkEncoder())  # 中文 → 4级粒度 + 文言压缩
-
-# 编码器自动选择（基于置信度检测）
-best_encoder = registry.detect_best("def hello(): print('world')")
-ir = best_encoder.encode("def hello(): print('world')")
-
-# 按预算解码
-from lcm import ContentDecoder
-decoder = ContentDecoder()
-content, level = decoder.decode(ir, available_tokens=200)
-print(f"注入粒度: {level.value}, 内容: {content}")
-```
-
-## 内置编码器
-
-| 编码器 | 类型 | 说明 |
-|--------|------|------|
-| `CodeIntentEncoder` | 代码 | 提取函数/类签名、调用图、docstring，支持 Python/JS/TS/Go/Rust/Java |
-| `ChineseThinkEncoder` | 中文 | 关键词 + 文言压缩 + 结构化要点 |
-| `EnglishLogicEncoder` | 英文 | 停用词过滤 + 大纲提取 + 论点归纳 |
-| `ASTCodeEncoder` | AST | 基于 Tree-sitter 的 AST 精确编码，支持多语言 |
-
-## 性能数据
-
-| 编码器 | 内容类型 | 原始大小 | KEYWORDS | SUMMARY | DETAIL | 节省率 |
-|--------|---------|---------|----------|---------|--------|--------|
-| CodeIntentEncoder | Python 500行 | 5000 tok | ~40 tok | ~150 tok | ~600 tok | ~88%-99% |
-| ChineseThinkEncoder | 中文 2000字 | 2000 tok | ~30 tok | ~100 tok | ~400 tok | ~80%-96% |
-
-## 项目文件结构
+## 模块架构
 
 ```
-lcm/
-├── __init__.py           # 统一导出 + create_engine 工厂函数
-├── ir_models.py          # 4级粒度 IR 数据模型
-├── encoder_base.py       # 编码器/解码器抽象基类
-├── encoding_registry.py  # 编码器注册表
-├── chunk_store.py        # Chunk 存储（LRU + JSONL）
-├── encoded_chunk_store.py # 编码 Chunk 存储
-├── sentinel_detector.py  # 哨兵检测器
-├── adaptive_injector.py  # 自适应注入器
-├── execution_profile.py  # 计费经济学路由
-├── cache_builder.py      # Prompt Caching 优化
-├── lcm_engine.py         # LCM 引擎核心
-├── urr_reporter.py       # URR 报告器
-├── label_system.py       # 锚点标签系统
-├── golden_corpus.py      # 黄金语料收集
-├── dynamic_renderer.py   # 动态模板渲染
-├── semantic_slicer.py    # 语义切片器
-├── ab_test_router.py     # A/B 测试路由
-├── content_encoding.py   # V1 内容编码兼容层
-├── encoders/
-│   ├── code_intent.py    # 代码意图编码器
-│   ├── chinese_think.py  # 中文思考编码器
-│   ├── english_logic.py  # 英语逻辑编码器
-│   └── ast_backend.py    # AST 编码器
-└── test_lcm.py           # 综合测试套件（25 个测试函数）
+┌─────────────┐    ┌──────────────┐    ┌─────────────┐
+│   客户端     │───▶│   调度器     │───▶│   存储层     │
+│  LCMClient  │    │ LCMOrchestr  │    │ ChunkStore  │
+└─────────────┘    └──────────────┘    └─────────────┘
+       │                   │                   │
+       ▼                   ▼                   ▼
+┌─────────────┐    ┌──────────────┐    ┌─────────────┐
+│   检测器     │    │   依赖图     │    │   混合模式   │
+│  Sentinel   │    │  ChunkGraph  │    │ HybridMode  │
+└─────────────┘    └──────────────┘    └─────────────┘
 ```
-
-## 版本系列
-
-| 版本 | 分支 | 说明 |
-|------|------|------|
-| **LCM3** | `main` | 全功能主版本，带完整编码器体系 |
-| LCM2 | `lcm2` | V2 协议版本，面向高级集成场景 |
-| LCM1 | `lcm1` | 精简版，最小依赖，快速集成 |
 
 ## 许可证
 

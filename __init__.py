@@ -1,151 +1,175 @@
 """
-LCM - Lazy Context Materialization
+LCM v2 - 惰性上下文物化协议 v2
 
-Independent multi-granularity context supply system.
-Extracted from IRIS LCM2 as a standalone project.
-
-Architecture:
-  Raw content -> [Encoding Layer] -> Multi-Granularity IR -> [Storage & Routing] -> [Decoding Layer] -> LLM injection
-
-Core features:
-  - Fixed 4-level grain hierarchy (KEYWORDS/SUMMARY/DETAIL/FULL)
-  - Pluggable encoder architecture
-  - Lazy encoding with async warmup
-  - ExecutionProfile-based billing-economics routing
-  - Soft upgrade state machine with cooldown
-  - URR monitoring and golden corpus collection
-  - Dynamic template rendering
-  - Semantic slicing for fallback compression
-  - A/B test routing for controlled experiments
+核心改进：
+- 线程安全：所有操作带 RLock 保护
+- 持久化：JSONL + 索引文件，进程重启不丢失
+- 精确 Token 计数：支持 tiktoken 和中文估算
+- LRU 缓存：热点 chunk 内存缓存
+- 语义搜索：支持向量相似度（可选 embedding）
+- 批量操作：批量加载、预取
+- 全面指标：延迟、命中率、缓存统计
+- Token 预算管理：防止上下文溢出
+- Chunk 依赖图：DAG 拓扑排序
+- 混合模式：高频直接注入 + 低频 LCM
+- API 路由自动识别：云端/本地自动切换
+- KV Cache 联动：利用云厂商缓存机制
+- 自适应粒度：粗/细粒度动态调整
+- 质量评估：系统性答案质量评估
+- 多模型基准：跨模型延迟+质量对比
+- 微调协议：LCM 原生 Fine-tuning 支持
+- 多 Agent 协作：共享组件索引去重
+- 内容编码层：支持可插拔的语言编码（中文思考、日语思考等）
 """
 
-from .ir_models import GrainLevel, Grain, MultiGranularityIR, IR_VERSION
-from .encoder_base import ContentEncoder, ContentDecoder, EncodingContext
-from .encoding_registry import EncodingRegistry, IdentityEncoder
-from .chunk_store import Chunk, ChunkStore
-from .encoded_chunk_store import EncodedChunkStore, EncodedChunk
-from .sentinel_detector import SentinelDetector, LoadRequest
-from .execution_profile import (
-    ExecutionProfile,
-    PROFILE_DEFAULTS,
-    PROFILE_UPGRADE_STRATEGY,
-    PROFILE_PROMPT_CACHING,
-    PROFILE_DYNAMIC_RENDERING,
+from .lcm_types import (
+    ContextChunk,
+    LCMEvent,
+    LoadRequest,
+    LCMSession,
+    LCMState,
+    ChunkLoadReason,
+    SentinelPattern,
+    LCMMetrics,
 )
-from .adaptive_injector import (
-    AdaptiveInjector,
-    UpgradeRequest,
-    DowngradeRequest,
-    InjectionAuditEntry,
-)
-from .cache_builder import CacheAwarePrefixBuilder
+from .store import ChunkStoreV2
+from .detector import SentinelDetectorV2
+from .orchestrator import LCMOrchestratorV2
+from .client import LCMClientV2
+from .prompt import build_initial_messages_v2
 from .content_encoding import (
     ContentEncoding,
     EncodingType,
-    EncodingContext as V1EncodingContext,
+    EncodingContext,
     ContentEncodingRegistry,
     IdentityEncoding,
     get_default_registry,
     register_encoding,
     get_encoding,
 )
-from .lcm_engine import (
-    LCMEngine,
-    LCMConfig,
-    LCMSession,
-    LCMState,
-    LCMEvent,
+from .token_budget import TokenBudget
+from .chunk_graph import ChunkGraph
+from .hybrid_mode import HybridChunkManager, HybridConfig, build_hybrid_messages
+from .provider_router import (
+    ProviderRouter, AdaptiveLCMClient,
+    ProviderConfig, ProviderType, RoutingStrategy,
 )
-from .urr_reporter import URRReporter, ChunkURRStats
-from .label_system import LabelStore, ChunkLabel, Anchor
-from .golden_corpus import GoldenCorpusCollector, GoldenSample
-from .dynamic_renderer import DynamicRenderer, RenderedSlice
-from .semantic_slicer import SemanticSlicer
-from .ab_test_router import ABTestRouter, ABTestConfig, ABTestResult
+from .kv_cache import KVCacheManager, CachedLCMOrchestrator
+from .adaptive_chunking import AdaptiveChunking, AdaptiveChunkStore, ChunkGroup
+from .quality_eval import QualityEvaluator, BenchmarkRunner, QualityMetrics
+from .multi_model_benchmark import MultiModelBenchmark, ModelConfig, BenchmarkResult
+from .fine_tuning import LCMFineTuner, LCMTuningDataset, FineTuningConfig
+from .multi_agent import MultiAgentLCM, SharedIndexManager, AgentSession
+from .logger import LCMLogger, get_logger, LCMErrorCode
+from .sqlite_store import SQLiteChunkStore
+from .vector_index import VectorIndex
+from .async_client import AsyncLCMClient, AsyncLLMWrapper
+from .compression import ChunkCompressor, CompressedChunkStore
+from .multimodal import MediaChunk, MediaChunkLoader, MediaType
+from .protocol import ProtocolVersion, ProtocolNegotiator, ProtocolAdapter
+from .distributed import DistributedChunkStore, DistributedIndexManager, NodeInfo
 
-from .encoders import (
-    CodeIntentEncoder,
-    ChineseThinkEncoder,
-    EnglishLogicEncoder,
-    ASTCodeEncoder,
-)
-
-
-def create_engine(
-    profile: ExecutionProfile = ExecutionProfile.LOCAL_CONSTRAINED,
-    register_default_encoders: bool = True,
-    **kwargs,
-) -> LCMEngine:
-    registry = EncodingRegistry()
-    if register_default_encoders:
-        registry.register(CodeIntentEncoder())
-        registry.register(ChineseThinkEncoder())
-        registry.register(EnglishLogicEncoder())
-        try:
-            registry.register(ASTCodeEncoder())
-        except Exception:
-            pass
-
-    config = LCMConfig(profile=profile, **kwargs)
-    engine = LCMEngine(config=config, encoding_registry=registry)
-    return engine
-
+# 尝试导入编码实现包（可选依赖）
+try:
+    from .encodings import (
+        ChineseThinkEncoding,
+        create_chinese_think_encoding,
+        register_all_encodings,
+    )
+    # 自动注册所有编码
+    register_all_encodings()
+except ImportError:
+    pass
 
 __all__ = [
-    "GrainLevel",
-    "Grain",
-    "MultiGranularityIR",
-    "IR_VERSION",
-    "ContentEncoder",
-    "ContentDecoder",
-    "EncodingContext",
-    "EncodingRegistry",
-    "IdentityEncoder",
-    "Chunk",
-    "ChunkStore",
-    "EncodedChunkStore",
-    "EncodedChunk",
-    "SentinelDetector",
+    # 核心类型
+    "ContextChunk",
+    "LCMEvent",
     "LoadRequest",
-    "ExecutionProfile",
-    "PROFILE_DEFAULTS",
-    "PROFILE_UPGRADE_STRATEGY",
-    "PROFILE_PROMPT_CACHING",
-    "PROFILE_DYNAMIC_RENDERING",
-    "AdaptiveInjector",
-    "UpgradeRequest",
-    "DowngradeRequest",
-    "InjectionAuditEntry",
-    "CacheAwarePrefixBuilder",
+    "LCMSession",
+    "LCMState",
+    "ChunkLoadReason",
+    "SentinelPattern",
+    "LCMMetrics",
+    # 核心组件
+    "ChunkStoreV2",
+    "SentinelDetectorV2",
+    "LCMOrchestratorV2",
+    "LCMClientV2",
+    "build_initial_messages_v2",
+    # 内容编码层
     "ContentEncoding",
     "EncodingType",
-    "V1EncodingContext",
+    "EncodingContext",
     "ContentEncodingRegistry",
     "IdentityEncoding",
     "get_default_registry",
     "register_encoding",
     "get_encoding",
-    "LCMEngine",
-    "LCMConfig",
-    "LCMSession",
-    "LCMState",
-    "LCMEvent",
-    "URRReporter",
-    "ChunkURRStats",
-    "LabelStore",
-    "ChunkLabel",
-    "Anchor",
-    "GoldenCorpusCollector",
-    "GoldenSample",
-    "DynamicRenderer",
-    "RenderedSlice",
-    "SemanticSlicer",
-    "ABTestRouter",
-    "ABTestConfig",
-    "ABTestResult",
-    "CodeIntentEncoder",
-    "ChineseThinkEncoder",
-    "EnglishLogicEncoder",
-    "ASTCodeEncoder",
-    "create_engine",
+    # 编码实现（可选）
+    "ChineseThinkEncoding",
+    "create_chinese_think_encoding",
+    # Token 预算
+    "TokenBudget",
+    # Chunk 依赖图
+    "ChunkGraph",
+    # 混合模式
+    "HybridChunkManager",
+    "HybridConfig",
+    "build_hybrid_messages",
+    # Provider 路由
+    "ProviderRouter",
+    "AdaptiveLCMClient",
+    "ProviderConfig",
+    "ProviderType",
+    "RoutingStrategy",
+    # KV Cache
+    "KVCacheManager",
+    "CachedLCMOrchestrator",
+    # 自适应粒度
+    "AdaptiveChunking",
+    "AdaptiveChunkStore",
+    "ChunkGroup",
+    # 质量评估
+    "QualityEvaluator",
+    "BenchmarkRunner",
+    "QualityMetrics",
+    # 多模型基准
+    "MultiModelBenchmark",
+    "ModelConfig",
+    "BenchmarkResult",
+    # 微调
+    "LCMFineTuner",
+    "LCMTuningDataset",
+    "FineTuningConfig",
+    # 多 Agent
+    "MultiAgentLCM",
+    "SharedIndexManager",
+    "AgentSession",
+    # 日志
+    "LCMLogger",
+    "get_logger",
+    "LCMErrorCode",
+    # SQLite
+    "SQLiteChunkStore",
+    # 向量索引
+    "VectorIndex",
+    # 异步
+    "AsyncLCMClient",
+    "AsyncLLMWrapper",
+    # 压缩
+    "ChunkCompressor",
+    "CompressedChunkStore",
+    # 多模态
+    "MediaChunk",
+    "MediaChunkLoader",
+    "MediaType",
+    # 协议
+    "ProtocolVersion",
+    "ProtocolNegotiator",
+    "ProtocolAdapter",
+    # 分布式
+    "DistributedChunkStore",
+    "DistributedIndexManager",
+    "NodeInfo",
 ]
