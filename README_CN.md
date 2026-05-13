@@ -1,156 +1,88 @@
-# LCM3 — 惰性上下文物化协议 v3（完整编码器版）
+# LCM1 — 惰性上下文物化协议 v1（精简版）
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 
-[English](README_EN.md)
+[English](README_EN.md) | [论文 (中文)](docs/PAPER_CN.md) | [Paper (English)](docs/PAPER_EN.md)
 
 ---
 
 ## 概述
 
-**LCM3** 是 LCM 系列的全功能主版本。在核心惰性上下文物化协议之上，引入了**完整的多粒度编码器体系**，将原始代码/文档智能压缩为 4 级粒度（KEYWORDS / SUMMARY / DETAIL / FULL），实现 Token 节省 80%-96% 的同时保持信息可恢复性。
+**LCM1** 是 LCM 协议的精简发布版，零额外依赖（仅 httpx），专注于解决 Agent 框架的首轮 Prompt 膨胀问题。
 
-从 IRIS (Intelligent Routing & Inference System) v17 架构中提取的核心组件，经过生产环境验证。
+将巨型首轮 Prompt（10,000-50,000 tokens）拆解为"精简索引（~500t）+ 按需加载"模式，实测本地部署 TTFT 降低 **1.1×-3.2×**。
 
-## 核心架构
-
-```
-原始内容 → [编码器层] → 多粒度 IR → [存储 & 路由] → [解码层] → LLM 注入
-                           ↓
-                    4 级粒度：
-                    KEYWORDS (~30-50 tok)
-                    SUMMARY  (~80-200 tok)
-                    DETAIL   (~300-800 tok)
-                    FULL     (原始大小)
-```
-
-### 六大核心引擎
-
-| 引擎 | 说明 |
-|------|------|
-| **多粒度编码器** | 可插拔架构，内置代码意图 / 中文思考 / 英语逻辑 / AST 四种编码器 |
-| **哨兵协议** | `[NEED_CHUNK:id]` / `[NEED_CHUNK_DETAIL:id]` / `[NEED_CHUNK_FULL:id]` 标准协议 |
-| **自适应注入器** | 软升级状态机 + 冷却窗口 + 计费经济学路由 |
-| **Chunk 存储** | LRU 缓存 + JSONL 持久化 + 异步预热 |
-| **动态渲染器** | 锚点标签驱动的微秒级精度注入 |
-| **渐进式校验网关** | 三级校验（语法 → Lint → 关联单测），弹性放行 |
+所属 LCM 版本家族：
+| 版本 | 分支 | 说明 |
+|------|------|------|
+| LCM3 | `main` | **全功能主版本**，带完整多粒度编码器体系 |
+| LCM2 | `lcm2` | **V2 协议版**，面向高级集成（多 Agent、分布式、多模态） |
+| **LCM1** | **`lcm1`** | **精简版**，最小依赖，3 步快速集成 |
 
 ## 快速开始
 
 ### 安装
 
 ```bash
-pip install lcm
+pip install -e .
+# 依赖仅 httpx
 ```
 
-### 基本使用
+### 3 步集成
 
 ```python
-from lcm import create_engine, GrainLevel
-from lcm.chunk_store import Chunk, ChunkStore
+from lcm import ChunkStore, ContextChunk, LCMOrchestrator, build_initial_messages
 
-# 创建编码器注册 + 引擎
-engine = create_engine()
+# 步骤 1: 注册 Prompt 组件为 LCM 块
+store = ChunkStore()
+store.add_chunk(ContextChunk(
+    chunk_id="tool:search",
+    summary="search_web(keyword) — 搜索网页内容，返回前10条",
+    content="def search_web(keyword: str) -> List[Result]: ...",
+    tokens=150,
+))
 
-# 注册上下文块
-chunk = Chunk(
-    chunk_id="auth_handler",
-    content="def login(username, password):\n    return authenticate(username, password)",
-    summary="认证处理器",
-    tokens=80,
-)
-engine.store.add(chunk)
+# 步骤 2: 构建 LCM 消息 + 运行
+orchestrator = LCMOrchestrator(chunk_store=store)
+messages = build_initial_messages("帮我搜索最新 AI 论文", store)
 
-# 预热编码缓存
-engine.warmup_encodings()
-
-# 构建系统提示词（含索引 + 哨兵协议指令）
-session = engine.new_session("demo")
-system_prompt = engine.build_system_prompt(
-    "你是一位 AI 助手，使用 [NEED_CHUNK:id] 按需加载上下文。",
-    "请审查认证模块",
-)
-
-# 处理 LLM 响应中的哨兵标记
-response_text = "让我看看 [NEED_CHUNK:auth_handler] 的实现"
-clean_text, load_requests = engine.process_response(response_text)
+# 步骤 3: 流式生成（stream_fn 是你的 LLM API 包装函数）
+for chunk in orchestrator.run_stream(messages, your_stream_fn):
+    print(chunk, end="")
 ```
 
-### 使用多粒度编码器
+完整示例见 [examples/basic_usage.py](examples/basic_usage.py)。
 
-```python
-from lcm import EncodingRegistry
-from lcm.encoders import CodeIntentEncoder, ChineseThinkEncoder
+## API 概览
 
-registry = EncodingRegistry()
-registry.register(CodeIntentEncoder())    # 代码 → 4级粒度 + 调用图
-registry.register(ChineseThinkEncoder())  # 中文 → 4级粒度 + 文言压缩
+| 类 | 作用 |
+|---|------|
+| `ChunkStore` | 块注册表 — add / get / find_related |
+| `SentinelDetector` | 流式哨兵检测器 |
+| `LCMOrchestrator` | 协议编排器 — 状态机 + 调度循环 |
+| `LCMClient` | 便捷包装器（组合 Store + Orchestrator + stream_fn） |
 
-# 编码器自动选择（基于置信度检测）
-best_encoder = registry.detect_best("def hello(): print('world')")
-ir = best_encoder.encode("def hello(): print('world')")
+## 功能特性
 
-# 按预算解码
-from lcm import ContentDecoder
-decoder = ContentDecoder()
-content, level = decoder.decode(ir, available_tokens=200)
-print(f"注入粒度: {level.value}, 内容: {content}")
-```
+- **标准哨兵协议**：`[NEED_CHUNK:chunk_id]` — 纯文本，无需 API 修改
+- **六态状态机**：IDLE → GENERATING → WAITING_CHUNK → RESUMING → COMPLETED / ERROR
+- **多轮续接**：API 完全兼容的 Route B 策略
+- **Speculative Prefetch**：关键词交叠 + 来源前缀 + 热度加权的关联预取
+- **四层防护**：同轮去重 / 跨轮跟踪 / 轮次上限(20) / chunk_miss 容错
+- **零额外依赖**：纯 Python 标准库 + httpx
 
-## 内置编码器
+## 性能数据（三平台实测）
 
-| 编码器 | 类型 | 说明 |
-|--------|------|------|
-| `CodeIntentEncoder` | 代码 | 提取函数/类签名、调用图、docstring，支持 Python/JS/TS/Go/Rust/Java |
-| `ChineseThinkEncoder` | 中文 | 关键词 + 文言压缩 + 结构化要点 |
-| `EnglishLogicEncoder` | 英文 | 停用词过滤 + 大纲提取 + 论点归纳 |
-| `ASTCodeEncoder` | AST | 基于 Tree-sitter 的 AST 精确编码，支持多语言 |
+| 平台 | 规模 | 传统 TTFT | LCM TTFT | 加速比 | 建议 |
+|------|:---:|:---:|:---:|:---:|:---:|
+| **本地 35B (4bit)** | 32,000t | 50,171ms | 15,840ms | **3.2×** | ✅ 强烈推荐 |
+| DeepSeek V4 Flash | 64,000t | 5,442ms | 16,354ms | 0.3× | ❌ 不推荐 |
+| 阿里百炼 Qwen3-235B | 383t | 1,738ms | 22,350ms | 0.08× | ❌ 不推荐 |
 
-## 性能数据
+## 兼容性
 
-| 编码器 | 内容类型 | 原始大小 | KEYWORDS | SUMMARY | DETAIL | 节省率 |
-|--------|---------|---------|----------|---------|--------|--------|
-| CodeIntentEncoder | Python 500行 | 5000 tok | ~40 tok | ~150 tok | ~600 tok | ~88%-99% |
-| ChineseThinkEncoder | 中文 2000字 | 2000 tok | ~30 tok | ~100 tok | ~400 tok | ~80%-96% |
-
-## 项目文件结构
-
-```
-lcm/
-├── __init__.py           # 统一导出 + create_engine 工厂函数
-├── ir_models.py          # 4级粒度 IR 数据模型
-├── encoder_base.py       # 编码器/解码器抽象基类
-├── encoding_registry.py  # 编码器注册表
-├── chunk_store.py        # Chunk 存储（LRU + JSONL）
-├── encoded_chunk_store.py # 编码 Chunk 存储
-├── sentinel_detector.py  # 哨兵检测器
-├── adaptive_injector.py  # 自适应注入器
-├── execution_profile.py  # 计费经济学路由
-├── cache_builder.py      # Prompt Caching 优化
-├── lcm_engine.py         # LCM 引擎核心
-├── urr_reporter.py       # URR 报告器
-├── label_system.py       # 锚点标签系统
-├── golden_corpus.py      # 黄金语料收集
-├── dynamic_renderer.py   # 动态模板渲染
-├── semantic_slicer.py    # 语义切片器
-├── ab_test_router.py     # A/B 测试路由
-├── content_encoding.py   # V1 内容编码兼容层
-├── encoders/
-│   ├── code_intent.py    # 代码意图编码器
-│   ├── chinese_think.py  # 中文思考编码器
-│   ├── english_logic.py  # 英语逻辑编码器
-│   └── ast_backend.py    # AST 编码器
-└── test_lcm.py           # 综合测试套件（25 个测试函数）
-```
-
-## 版本系列
-
-| 版本 | 分支 | 说明 |
-|------|------|------|
-| **LCM3** | `main` | 全功能主版本，带完整编码器体系 |
-| LCM2 | `lcm2` | V2 协议版本，面向高级集成场景 |
-| LCM1 | `lcm1` | 精简版，最小依赖，快速集成 |
+兼容所有 OpenAI-compatible API 端点（DeepSeek、阿里百炼、OpenAI、Ollama、LM Studio、vLLM 等）。
 
 ## 许可证
 

@@ -3,15 +3,15 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
-name = "lcm"
-version = "3.0.0"
-description = "LCM3 — Lazy Context Materialization with Multi-Granularity Encoding"
-readme = "README_CN.md"
+name = "lcm-prompt"
+version = "1.0.0"
+description = "Lazy Context Materialization (LCM) — Global Prompt Segmentation for Agent Frameworks"
+readme = "README_EN.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
-dependencies = []
+dependencies = ["httpx>=0.24.0"]
 authors = [{name = "LCM Contributors"}]
-keywords = ["llm", "agent", "prompt", "context", "lazy-loading", "encoding", "ast"]
+keywords = ["llm", "agent", "prompt", "optimization", "context", "lazy-loading"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -27,6 +27,7 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/YarXVI/lcm-prompt"
 Repository = "https://github.com/YarXVI/lcm-prompt"
+Paper = "https://github.com/YarXVI/lcm-prompt/blob/main/docs/PAPER_EN.md"
 
 [tool.setuptools.packages.find]
 include = ["lcm*"]
